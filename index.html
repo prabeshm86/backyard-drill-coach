@@ -75,6 +75,7 @@ video { display: none; }
 .overlay {
   position: absolute; inset: 0; display: grid; place-items: center; text-align: center;
   background: rgba(5,18,11,.78); padding: 24px;
+  pointer-events: none;   /* taps go through to the camera view (tap-to-lock the ball) */
 }
 .overlay .inner { max-width: 560px; display: flex; flex-direction: column; gap: 14px; align-items: center; }
 .overlay h2 { margin: 0; font-family: var(--display); font-weight: 400; font-size: clamp(2rem, 6vw, 3.4rem); color: var(--pop); text-wrap: balance; }
@@ -164,6 +165,7 @@ select { background: #0f2a1d; color: var(--line); border: 2px solid #2d6146; bor
 <script type="module">
 import { FilesetResolver, PoseLandmarker, ObjectDetector }
   from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+import { OneEuro, learnColor, blendColor, findBlob, findBestBlob, chooseRoi } from "./ball-tracker.js";
 
 /* ---------- Drill definitions ---------- */
 const DRILLS = {
@@ -311,7 +313,9 @@ function addRep(msg) {
 async function init() {
   requestAnimationFrame(loop);
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
+    // Test hook: a same-origin test page can embed this one and supply a fake camera.
+    let testCam = null; try { testCam = window.parent !== window && window.parent.__fakeCam; } catch {}
+    const stream = testCam ? testCam() : await navigator.mediaDevices.getUserMedia({
       video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" }, audio: false,
     });
     video.srcObject = stream; await video.play();
@@ -329,8 +333,8 @@ async function init() {
         runningMode: "VIDEO", numPoses: 1,
       });
       detector = await ObjectDetector.createFromOptions(vision, {
-        baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite", delegate },
-        runningMode: "VIDEO", scoreThreshold: 0.25, maxResults: 3, categoryAllowlist: ["sports ball"],
+        baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite2/float16/1/efficientdet_lite2.tflite", delegate },
+        runningMode: "VIDEO", scoreThreshold: 0.2, maxResults: 5, categoryAllowlist: ["sports ball"],
       });
     };
     try { await make("GPU"); } catch { await make("CPU"); }
@@ -340,7 +344,8 @@ async function init() {
   }
   overlay(`<h2>Ready to train?</h2>
     <p>Put the laptop on a chair about 2–3 big steps away so your whole body and the ball fit on screen.
-    Watch the blue ghost in the corner to see how the drill goes, then press <b>Start</b>.</p>`);
+    Watch the blue ghost in the corner to see how the drill goes, then press <b>Start</b>.</p>
+    <p>If "Ball found" doesn't turn green, <b>tap the ball on the screen</b> to lock onto its color.</p>`);
   $("go").disabled = false;
 }
 
@@ -358,24 +363,125 @@ function track(now) {
     person = { lm, feetSeen, t: now };
   } else if (person && now - person.t > 400) person = null;
 
-  // Ball detection every other frame (it's the heavier model)
-  if (detector && (frame++ % 2 === 0)) {
-    const r = detector.detectForVideo(video, ts);
-    let bestD = null;
-    for (const d of r.detections || []) {
-      const s = d.categories[0]?.score ?? 0;
-      if (!bestD || s > bestD.s) bestD = { d, s };
-    }
-    if (bestD) {
-      const bb = bestD.d.boundingBox;
-      const cx = W - (bb.originX + bb.width / 2), cy = bb.originY + bb.height / 2;
-      const rr = (bb.width + bb.height) / 4;
-      if (ball && now - ball.t < 300) {
-        const a = 0.6; // smoothing
-        ball = { x: ball.x + (cx - ball.x) * a, y: ball.y + (cy - ball.y) * a, r: ball.r + (rr - ball.r) * 0.3, t: now };
-      } else ball = { x: cx, y: cy, r: rr, t: now };
-    } else if (ball && now - ball.t > 450) ball = null;
+    trackBall(now, ts, W, H);
+}
+
+/* Ball tracking. Three layers:
+   1. AI detector on a zoomed-in crop around her feet (or the last ball spot),
+      so the ball is big enough in the model's input to be recognised.
+   2. Color lock: once the ball is found (or tapped), follow its color every
+      frame. Fast, and it keeps up with a rolling ball between AI checks.
+   3. One-Euro smoothing: steady ring when still, little lag when moving.
+   All internal positions are raw (unmirrored) camera pixels. */
+const AS = 4;                                   // color analysis is at 1/4 size
+const ana = document.createElement("canvas"), actxA = ana.getContext("2d", { willReadFrequently: true });
+const roiCv = document.createElement("canvas"), roiCtx = roiCv.getContext("2d");
+roiCv.width = roiCv.height = 448;
+const filt = { x: new OneEuro(0.8, 0.015), y: new OneEuro(0.8, 0.015), r: new OneEuro(0.6, 0.002) };
+let pendingTap = null;
+let colorModel = null, rawBall = null, ballSrc = "", ballScore = 0, lastBallR = 18;
+// "Seen recently" = within 4 frames or 500 ms, whichever is longer (slow laptops get more time).
+const isRecent = b => b && (frame - b.f <= 4 || performance.now() - b.t < 500);
+
+function detectBall(ts, W, H) {
+  let feet = null;
+  if (person) {
+    const lm = person.lm, ay = (lm[27].y + lm[28].y) / 2, hy = (lm[23].y + lm[24].y) / 2;
+    feet = { x: W - (lm[27].x + lm[28].x) / 2, y: ay, legLen: Math.abs(ay - hy) };
   }
+  const recent = isRecent(rawBall) ? rawBall : null;
+  // Ball known: zoom on it, full look every 6th frame. Ball unknown: alternate feet-area zoom and full picture.
+  const roi = chooseRoi(W, H, recent, feet, recent ? 6 : 2, frame);
+  let res, map;
+  if (roi) {
+    roiCtx.drawImage(video, roi.sx, roi.sy, roi.s, roi.s, 0, 0, 448, 448);
+    res = detector.detectForVideo(roiCv, ts);
+    const k = roi.s / 448;
+    map = bb => ({ x: roi.sx + (bb.originX + bb.width / 2) * k, y: roi.sy + (bb.originY + bb.height / 2) * k, r: (bb.width + bb.height) / 4 * k });
+  } else {
+    res = detector.detectForVideo(video, ts);
+    map = bb => ({ x: bb.originX + bb.width / 2, y: bb.originY + bb.height / 2, r: (bb.width + bb.height) / 4 });
+  }
+  let best = null;
+  for (const d of res.detections || []) {
+    const s = d.categories[0]?.score ?? 0;
+    const m = map(d.boundingBox);
+    // prefer detections near where the ball just was
+    const near = recent ? Math.max(0, 1 - Math.hypot(m.x - recent.x, m.y - recent.y) / (recent.r * 8)) * 0.15 : 0;
+    if (!best || s + near > best.s + best.near) best = { ...m, s, near };
+  }
+  return best;
+}
+
+function colorTrack(W, H) {
+  if (!colorModel) return null;
+  const aw = ana.width, ah = ana.height;
+  const img = actxA.getImageData(0, 0, aw, ah).data;
+  const recent = isRecent(rawBall) ? rawBall : null;
+  let b;
+  if (recent) {
+    const R = Math.max(recent.r * 3, H * 0.06) / AS;
+    b = findBlob(img, aw, ah, colorModel, { x0: recent.x / AS - R, y0: recent.y / AS - R, x1: recent.x / AS + R, y1: recent.y / AS + R, seedX: recent.x / AS, seedY: recent.y / AS }, recent.r / AS);
+  } else if (!colorModel.neutral) {
+    b = findBestBlob(img, aw, ah, colorModel, lastBallR / AS);   // whole-picture search only for colored balls
+  } else return null;
+  return b ? { x: b.x * AS, y: b.y * AS, r: b.r * AS } : null;
+}
+
+function trackBall(now, ts, W, H) {
+  if (ana.width !== Math.round(W / AS)) { ana.width = Math.round(W / AS); ana.height = Math.round(H / AS); }
+  actxA.drawImage(video, 0, 0, ana.width, ana.height);
+  frame++;
+  if (pendingTap) applyTap();
+
+  const fromColor = colorTrack(W, H);
+  // Run the (heavier) AI model every frame until locked, then every 3rd frame to re-check.
+  const fromAI = detector && (!colorModel || !fromColor || frame % 3 === 0) ? detectBall(ts, W, H) : null;
+
+  let meas = null;
+  if (fromAI && fromAI.s >= 0.3) {
+    meas = fromAI; ballSrc = "AI"; ballScore = fromAI.s;
+    if (fromAI.s >= 0.45 && fromAI.r > 6) {   // teach / refresh the color lock from a confident detection
+      const img = actxA.getImageData(0, 0, ana.width, ana.height).data;
+      const c = learnColor(img, ana.width, ana.height, fromAI.x / AS, fromAI.y / AS, fromAI.r * 0.45 / AS);
+      colorModel = blendColor(colorModel, c, colorModel ? 0.15 : 1);
+    }
+  } else if (fromColor) {
+    meas = fromColor; ballSrc = "color";
+  } else if (fromAI) {
+    meas = fromAI; ballSrc = "AI"; ballScore = fromAI.s;   // weak detection, still better than nothing
+  }
+
+  if (meas) {
+    if (!isRecent(rawBall)) { filt.x.reset(); filt.y.reset(); filt.r.reset(); }
+    rawBall = { x: filt.x.filter(meas.x, now), y: filt.y.filter(meas.y, now), r: filt.r.filter(meas.r, now), t: now, f: frame };
+    lastBallR = rawBall.r;
+  } else if (rawBall && !isRecent(rawBall)) rawBall = null;
+
+  ball = rawBall ? { x: W - rawBall.x, y: rawBall.y, r: rawBall.r, t: rawBall.t } : null;
+}
+
+// Tap the ball on screen to lock onto its color.
+view.addEventListener("click", e => {
+  if (!view.width || video.readyState < 2) return;
+  const r = view.getBoundingClientRect(), W = view.width, H = view.height;
+  const k = Math.min(r.width / W, r.height / H);
+  const cx = (e.clientX - r.left - (r.width - W * k) / 2) / k, cy = (e.clientY - r.top - (r.height - H * k) / 2) / k;
+  if (cx < 0 || cy < 0 || cx > W || cy > H) return;
+  // Learn the color on the next camera frame (the tap can arrive before a frame is ready).
+  pendingTap = { x: W - cx, y: cy, r: Math.max(rawBall?.r ?? 0, H * 0.025) };
+  beep(990, .08);
+});
+
+function applyTap() {
+  const t = pendingTap; pendingTap = null;
+  const img = actxA.getImageData(0, 0, ana.width, ana.height).data;
+  const m = learnColor(img, ana.width, ana.height, t.x / AS, t.y / AS, t.r * 0.6 / AS);
+  if (!m || m.v < 8) { say("Couldn't see the ball there. Tap it again.", 1800); return; }
+  colorModel = m;
+  rawBall = { x: t.x, y: t.y, r: t.r, t: performance.now(), f: frame };
+  filt.x.reset(); filt.y.reset(); filt.r.reset();
+  say(m.neutral ? "Locked! (A bright colored ball tracks best)" : "Ball locked!", 1800);
 }
 
 /* ---------- Rep detection per drill ---------- */
@@ -581,7 +687,9 @@ function loop(now) {
   $("chipBody").className = "chip" + (bodyOk ? " ok" : "");
   $("chipBody").textContent = bodyOk ? "Player found" : person ? "Step back, I can't see your feet" : "Step into the picture";
   $("chipBall").className = "chip" + (ballOk ? " ok" : "");
-  $("chipBall").textContent = ballOk ? "Ball found" : "Put the ball in view";
+  $("chipBall").textContent = ballOk
+    ? (ballSrc === "color" ? "Ball found (color lock)" : `Ball found (AI ${Math.round(ballScore * 100)}%)`)
+    : video.readyState >= 2 ? "No ball: tap it on screen" : "Put the ball in view";
 
   // Timers
   if (mode === "countdown") {
