@@ -80,6 +80,7 @@ kbd { font-family: var(--body); font-weight: 800; border: 1px solid var(--edge);
   <canvas id="preview" width="640" height="360"></canvas>
   <p id="msg">Point the camera at the wall so it sees the whole projected picture. Then press <b>Calibrate</b>.</p>
   <div class="row">
+    <select id="camSel" aria-label="Camera" title="Which camera to use" hidden></select>
     <button class="btn" id="calBtn">Calibrate</button>
     <select id="size" aria-label="Target size">
       <option value="0.13">Big targets</option>
@@ -107,6 +108,7 @@ kbd { font-family: var(--body); font-weight: 800; border: 1px solid var(--edge);
 <script type="module">
 import { FilesetResolver, ObjectDetector }
   from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+import { startCamera, fillCameraSelect, wireCameraSelect, cameraId } from "./camera.js";
 
 const $ = id => document.getElementById(id);
 const wall = $("wall"), wctx = wall.getContext("2d");
@@ -158,7 +160,9 @@ function mapPt(H, x, y) {
 }
 
 /* ---------- State ---------- */
-let H = store.get("tw-homography", null);
+let camStream = null;
+const calKey = k => `${k}-${cameraId(camStream) || "default"}`;   // calibration is per camera
+let H = null;
 let calPts = [], calibrating = false;
 let detector = null;
 let ball = null;              // latest detection in camera px {x,y,r,t}
@@ -214,7 +218,7 @@ prev.addEventListener("click", e => {
     const h = homography(calPts, CORNERS);
     stopCalibration();
     if (h) {
-      H = h; store.set("tw-homography", H); store.set("tw-calpts", calPts.slice()); refreshPills();
+      H = h; store.set(calKey("tw-homography"), H); store.set(calKey("tw-calpts"), calPts.slice()); refreshPills();
       msg("Calibrated. Kick the ball at the wall: a <b>cyan dot</b> shows where the camera sees it. Press <b>Start</b> when ready.");
     } else msg("Those four clicks didn't make a usable shape. Press <b>Calibrate</b> and try again.");
   } else msg(`Good. Now click circle <b>${calPts.length + 1}</b>.`);
@@ -282,15 +286,24 @@ function impact(nx, ny) {
 }
 
 /* ---------- Camera + detector ---------- */
+async function useStream(stream) {
+  camStream = stream; video.srcObject = stream; await video.play();
+  prev.width = video.videoWidth; prev.height = video.videoHeight;
+  pill("pCam", true, "Camera on");
+  H = store.get(calKey("tw-homography"), null) ?? store.get("tw-homography", null);   // older saves weren't per camera
+  refreshPills();
+  if (!H) msg("Point this camera at the wall so it sees the whole projected picture, then press <b>Calibrate</b>.");
+  fillCameraSelect($("camSel"), stream).catch(() => {});
+}
+wireCameraSelect($("camSel"), () => camStream, async s => {
+  hist = []; ball = null;
+  await useStream(s);
+  if (H) msg("Switched camera. Using this camera's saved calibration.");
+}, e => msg(`Couldn't open that camera (${e.name || e}). Is another app using it?`));
 async function init() {
   requestAnimationFrame(loop);
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60 } }, audio: false,
-    });
-    video.srcObject = stream; await video.play();
-    prev.width = video.videoWidth; prev.height = video.videoHeight;
-    pill("pCam", true, "Camera on");
+    await useStream(await startCamera());   // the camera picked last time, if it's still there
   } catch (e) {
     pill("pCam", false, "No camera");
     msg(`I couldn't open the camera (${e.name}). You can still test the game: press <b>Start</b> and click the targets.`);
@@ -448,7 +461,7 @@ function drawPreview(now) {
   });
   if (H && !calibrating) {
     // outline of the calibrated wall area, from the saved corner clicks
-    const saved = store.get("tw-calpts", null);
+    const saved = store.get(calKey("tw-calpts"), null);
     if (saved) {
       pctx.strokeStyle = "#ffd23f"; pctx.lineWidth = 2 * u; pctx.beginPath();
       saved.forEach(([x, y], i) => i ? pctx.lineTo(x, y) : pctx.moveTo(x, y)); pctx.closePath(); pctx.stroke();

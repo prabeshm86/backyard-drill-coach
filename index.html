@@ -159,6 +159,7 @@ select { background: #0f2a1d; color: var(--line); border: 2px solid #2d6146; bor
   </select>
   <button class="ghost-btn" id="ghostToggle" aria-pressed="true">Ghost: on</button>
   <button class="ghost-btn" id="soundToggle" aria-pressed="true">Sound: on</button>
+  <select id="camSel" aria-label="Camera" title="Which camera to use" hidden></select>
   <button class="ghost-btn" id="recBtn" title="Saves 15 seconds of camera video to Downloads, for testing the tracking">Record test clip</button>
   <label class="ghost-btn" for="clipFile" style="cursor:pointer" title="Play a recorded clip instead of the camera">Play a clip</label>
   <input type="file" id="clipFile" accept="video/*" hidden>
@@ -169,6 +170,7 @@ select { background: #0f2a1d; color: var(--line); border: 2px solid #2d6146; bor
 import { FilesetResolver, PoseLandmarker, ObjectDetector }
   from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
 import { BallTracker } from "./ball-tracker.js";
+import { startCamera, fillCameraSelect, wireCameraSelect } from "./camera.js";
 
 /* ---------- Drill definitions ---------- */
 const DRILLS = {
@@ -344,6 +346,14 @@ $("recBtn").addEventListener("click", () => {
 });
 $("clipFile").addEventListener("change", e => { const f = e.target.files[0]; if (f) playClip(URL.createObjectURL(f)); });
 let noCam = false;
+// Camera selector: switch cameras (iPhone, webcam, built-in) without reloading.
+wireCameraSelect($("camSel"), () => camStream, async s => {
+  video.removeAttribute("src"); video.srcObject = s; camStream = s; noCam = false;
+  await video.play();
+  view.width = video.videoWidth; view.height = video.videoHeight;
+  if (mode === "idle") overlay(null);
+  say(`Camera: ${s.getVideoTracks()[0]?.label || "switched"}`, 1800);
+}, e => say(`Couldn't open that camera (${e.name || e}). Is it in use by another app?`, 2800));
 async function playClip(url) {
   camStream?.getTracks().forEach(t => t.stop()); camStream = null;
   video.srcObject = null; video.src = url; video.loop = true; video.muted = true;
@@ -361,10 +371,9 @@ async function init() {
   else try {
     // Test hook: a same-origin test page can embed this one and supply a fake camera.
     let testCam = null; try { testCam = window.parent !== window && window.parent.__fakeCam; } catch {}
-    const stream = testCam ? testCam() : await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" }, audio: false,
-    });
+    const stream = testCam ? testCam() : await startCamera();   // the camera picked last time, if it's still there
     video.srcObject = stream; camStream = stream; await video.play();
+    fillCameraSelect($("camSel"), stream).catch(() => {});
   } catch (e) {
     noCam = true;
     if (!video.src) overlay(`<h2>No camera</h2><p>I couldn't open the camera (${e.name}). Allow camera access in the browser's address bar, then reload this page. You can still use <b>Play a clip</b>.</p>`);

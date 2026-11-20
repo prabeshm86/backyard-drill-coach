@@ -31,4 +31,4 @@ Tracking runs fully in the browser with [MediaPipe Tasks Vision](https://ai.goog
 python3 -m http.server 8765
 ```
 
-Then open http://localhost:8765 in Chrome and allow the camera. Place the laptop 2–3 big steps away so the whole body and the ball are visible.
+Then open http://localhost:8765 in Chrome and allow the camera. Pick the camera from the camera menu in the app (built-in, USB webcam, or an iPhone via Continuity Camera; turn off Center Stage so it doesn't crop out the feet). The choice is remembered, and Target Wall keeps a separate calibration for each camera. Place the laptop 2–3 big steps away so the whole body and the ball are visible.
