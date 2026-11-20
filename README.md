@@ -4,7 +4,7 @@ A soccer training page for kids. The webcam tracks the player and the ball, a bl
 
 Drills: Toe Taps, Tick-Tocks, Juggling. Timed rounds (30/45/60 s), stars, and a saved best score per drill.
 
-**Ball tracking (body drills):** an AI detector (EfficientDet-Lite2) looks at a zoomed-in crop around the player's feet, then around the ball once found. A color lock follows the ball between AI checks, and a One-Euro filter keeps the ring steady without lag. If "Ball found" stays red, **tap the ball on screen** to lock onto its color. A bright single-color ball (orange, yellow) tracks best. Logic lives in `ball-tracker.js`.
+**Ball tracking (body drills):** an AI detector (EfficientDet-Lite2) looks at a zoomed-in crop around the player's feet, then around the ball once found. A color lock follows the ball between AI checks, and a One-Euro filter keeps the ring steady without lag. If "Ball found" stays red, **tap the ball on screen** to lock on. Colored balls are followed by color; white/gray balls by shape (a ball-sized round patch with speckled panels), which can lose the ball when it crosses white socks or shoes, so a bright single-color ball (orange, yellow) tracks best. **Record test clip** saves 15 s of camera video; **Play a clip** (or `?clip=file.webm`) runs the tracker on it. Logic lives in `ball-tracker.js`.
 
 Tracking runs fully in the browser with [MediaPipe Tasks Vision](https://ai.google.dev/edge/mediapipe/solutions/vision/pose_landmarker) (pose landmarker + EfficientDet "sports ball" detector). No video leaves the computer.
 
