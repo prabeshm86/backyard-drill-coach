@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Target Wall</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lilita+One&family=Nunito:wght@500;700;800&display=swap">
+<style>
+/* Layout: the whole window is the projected wall (game canvas). A floating control card holds
+   the camera view, calibration and settings, and can be hidden while playing (key H). */
+:root {
+  --wall: #06140d;
+  --card: #0b2017;
+  --edge: #2d6146;
+  --line: #e9f5ec;
+  --mute: #9fc1ad;
+  --pop: #ffd23f;
+  --hit: #7cff6b;
+  --warn: #ff7a59;
+  --cyan: #6ee7ff;
+  --display: "Lilita One", "Arial Rounded MT Bold", system-ui, sans-serif;
+  --body: "Nunito", system-ui, -apple-system, "Segoe UI", sans-serif;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--wall); color: var(--line); font-family: var(--body); overflow: hidden; }
+#wall { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: crosshair; }
+video { display: none; }
+button, select { font-family: var(--body); font-weight: 800; }
+button { cursor: pointer; }
+button:focus-visible, select:focus-visible, a:focus-visible { outline: 3px solid var(--pop); outline-offset: 2px; }
+
+.card {
+  position: fixed; right: max(16px, env(safe-area-inset-right, 0px)); bottom: max(16px, env(safe-area-inset-bottom, 0px));
+  width: min(360px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto;
+  background: var(--card); border: 2px solid var(--edge); border-radius: 16px;
+  padding: 14px; display: flex; flex-direction: column; gap: 10px;
+  box-shadow: 0 12px 40px rgba(0,0,0,.5);
+}
+.card[hidden] { display: none; }
+.card.big {
+  width: min(960px, calc(100vw - 32px)); right: 50%; bottom: 50%; transform: translate(50%, 50%);
+}
+.card h1 { margin: 0; font-family: var(--display); font-weight: 400; font-size: 1.4rem; color: var(--pop); }
+.card .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.card p { margin: 0; font-size: .9rem; line-height: 1.45; color: var(--mute); }
+.card p b { color: var(--line); }
+#preview { width: 100%; border-radius: 10px; background: #000; display: block; aspect-ratio: 16 / 9; }
+.card.calibrating #preview { cursor: crosshair; outline: 3px solid var(--pop); }
+.btn { border: 2px solid var(--edge); background: transparent; color: var(--line); padding: 9px 14px; border-radius: 12px; font-size: .95rem; }
+.btn.primary { background: var(--hit); border-color: var(--hit); color: #062010; font-family: var(--display); font-weight: 400; font-size: 1.15rem; padding: 9px 22px; }
+.btn:disabled { opacity: .45; cursor: default; }
+select { background: var(--wall); color: var(--line); border: 2px solid var(--edge); border-radius: 12px; padding: 8px; font-size: .9rem; }
+label.chk { display: flex; gap: 6px; align-items: center; font-size: .9rem; color: var(--mute); }
+.status { display: flex; gap: 6px; flex-wrap: wrap; }
+.pill { padding: 4px 10px; border-radius: 999px; font-size: .8rem; font-weight: 800; border: 2px solid var(--warn); color: var(--warn); }
+.pill.ok { border-color: var(--hit); color: var(--hit); }
+a { color: var(--cyan); }
+.hint { font-size: .78rem; color: var(--mute); }
+kbd { font-family: var(--body); font-weight: 800; border: 1px solid var(--edge); border-radius: 5px; padding: 0 5px; color: var(--line); }
+</style>
+</head>
+<body>
+<canvas id="wall" aria-label="Projected target wall"></canvas>
+<video id="cam" playsinline muted></video>
+
+<section class="card" id="card" aria-label="Controls">
+  <div class="row" style="justify-content:space-between">
+    <h1>Target Wall</h1>
+    <a href="index.html" class="hint">Body drills</a>
+  </div>
+  <div class="status">
+    <span class="pill" id="pCam">Camera off</span>
+    <span class="pill" id="pModel">Ball tracker loading</span>
+    <span class="pill" id="pCal">Not calibrated</span>
+    <span class="pill" id="pBall">No ball</span>
+  </div>
+  <canvas id="preview" width="640" height="360"></canvas>
+  <p id="msg">Point the camera at the wall so it sees the whole projected picture. Then press <b>Calibrate</b>.</p>
+  <div class="row">
+    <button class="btn" id="calBtn">Calibrate</button>
+    <select id="size" aria-label="Target size">
+      <option value="0.13">Big targets</option>
+      <option value="0.095" selected>Medium targets</option>
+      <option value="0.07">Small targets</option>
+    </select>
+    <select id="len" aria-label="Round length">
+      <option value="30">30 sec</option>
+      <option value="60" selected>60 sec</option>
+      <option value="90">90 sec</option>
+    </select>
+  </div>
+  <div class="row">
+    <label class="chk"><input type="checkbox" id="dot" checked> Show ball dot on wall</label>
+    <label class="chk"><input type="checkbox" id="snd" checked> Sound</label>
+  </div>
+  <div class="row">
+    <button class="btn primary" id="go">Start</button>
+    <button class="btn" id="fs">Fullscreen</button>
+    <button class="btn" id="hide">Hide panel</button>
+  </div>
+  <p class="hint">No projector yet? Click anywhere on the wall to fake a ball hit. Keys: <kbd>Space</kbd> start, <kbd>H</kbd> hide panel, <kbd>F</kbd> fullscreen.</p>
+</section>
+
+<script type="module">
+import { FilesetResolver, ObjectDetector }
+  from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+const $ = id => document.getElementById(id);
+const wall = $("wall"), wctx = wall.getContext("2d");
+const prev = $("preview"), pctx = prev.getContext("2d");
+const video = $("cam");
+
+/* ---------- Persistent settings ---------- */
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+
+/* ---------- Homography (camera pixels -> wall 0..1) ---------- */
+const CORNERS = [[0.08, 0.08], [0.92, 0.08], [0.92, 0.92], [0.08, 0.92]];
+function solve(A, b) {
+  const n = b.length;
+  for (let i = 0; i < n; i++) {
+    let p = i;
+    for (let r = i + 1; r < n; r++) if (Math.abs(A[r][i]) > Math.abs(A[p][i])) p = r;
+    [A[i], A[p]] = [A[p], A[i]]; [b[i], b[p]] = [b[p], b[i]];
+    if (Math.abs(A[i][i]) < 1e-12) return null;
+    for (let r = i + 1; r < n; r++) {
+      const f = A[r][i] / A[i][i];
+      for (let c = i; c < n; c++) A[r][c] -= f * A[i][c];
+      b[r] -= f * b[i];
+    }
+  }
+  const x = new Array(n);
+  for (let i = n - 1; i >= 0; i--) {
+    let s = b[i];
+    for (let c = i + 1; c < n; c++) s -= A[i][c] * x[c];
+    x[i] = s / A[i][i];
+  }
+  return x;
+}
+function homography(src, dst) {
+  const A = [], b = [];
+  for (let i = 0; i < 4; i++) {
+    const [x, y] = src[i], [u, v] = dst[i];
+    A.push([x, y, 1, 0, 0, 0, -u * x, -u * y]); b.push(u);
+    A.push([0, 0, 0, x, y, 1, -v * x, -v * y]); b.push(v);
+  }
+  const h = solve(A, b);
+  return h ? [...h, 1] : null;
+}
+function mapPt(H, x, y) {
+  const w = H[6] * x + H[7] * y + 1;
+  return [(H[0] * x + H[1] * y + H[2]) / w, (H[3] * x + H[4] * y + H[5]) / w];
+}
+
+/* ---------- State ---------- */
+let H = store.get("tw-homography", null);
+let calPts = [], calibrating = false;
+let detector = null;
+let ball = null;              // latest detection in camera px {x,y,r,t}
+let hist = [];                // recent detections for impact detection
+let lastImpact = 0;
+let mode = "idle";            // idle | countdown | play | done
+let target = null;            // {x,y (0..1), born}
+let score = 0, hits = 0, shots = 0, reactions = [], endsAt = 0, cdEnd = 0;
+let effects = [];             // visual bursts {x,y,t,kind,text}
+let summary = null;
+
+/* ---------- Sound ---------- */
+let actx = null;
+function beep(freq = 880, dur = 0.09, vol = 0.25, type = "triangle") {
+  if (!$("snd").checked) return;
+  try {
+    actx ||= new (window.AudioContext || window.webkitAudioContext)();
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = type; o.frequency.value = freq;
+    g.gain.setValueAtTime(vol, actx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + dur);
+    o.connect(g).connect(actx.destination); o.start(); o.stop(actx.currentTime + dur);
+  } catch {}
+}
+
+/* ---------- UI ---------- */
+function pill(id, ok, text) { const el = $(id); el.className = "pill" + (ok ? " ok" : ""); el.textContent = text; }
+function msg(html) { $("msg").innerHTML = html; }
+function refreshPills() {
+  pill("pCal", !!H, H ? "Calibrated" : "Not calibrated");
+}
+refreshPills();
+
+$("calBtn").addEventListener("click", () => {
+  if (calibrating) { stopCalibration(); return; }
+  if (!video.srcObject) { msg("The camera isn't on, so I can't calibrate. Allow camera access and reload."); return; }
+  calibrating = true; calPts = [];
+  $("card").classList.add("big", "calibrating");
+  $("calBtn").textContent = "Cancel";
+  msg("In the camera picture below, click the <b>center of each yellow circle</b> in order: 1, 2, 3, 4.");
+});
+function stopCalibration() {
+  calibrating = false;
+  $("card").classList.remove("big", "calibrating");
+  $("calBtn").textContent = "Recalibrate";
+}
+prev.addEventListener("click", e => {
+  if (!calibrating) return;
+  const r = prev.getBoundingClientRect();
+  calPts.push([(e.clientX - r.left) * prev.width / r.width, (e.clientY - r.top) * prev.height / r.height]);
+  beep(660, .06);
+  if (calPts.length === 4) {
+    const h = homography(calPts, CORNERS);
+    stopCalibration();
+    if (h) {
+      H = h; store.set("tw-homography", H); store.set("tw-calpts", calPts.slice()); refreshPills();
+      msg("Calibrated. Kick the ball at the wall: a <b>cyan dot</b> shows where the camera sees it. Press <b>Start</b> when ready.");
+    } else msg("Those four clicks didn't make a usable shape. Press <b>Calibrate</b> and try again.");
+  } else msg(`Good. Now click circle <b>${calPts.length + 1}</b>.`);
+});
+
+$("go").addEventListener("click", () => (mode === "play" || mode === "countdown") ? endRound(true) : startCountdown());
+$("fs").addEventListener("click", () => { document.fullscreenElement ? document.exitFullscreen?.() : document.documentElement.requestFullscreen?.().catch(() => {}); });
+$("hide").addEventListener("click", () => { $("card").hidden = true; });
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "SELECT") return;
+  if (e.key === "h" || e.key === "H") $("card").hidden = !$("card").hidden;
+  if (e.key === "f" || e.key === "F") $("fs").click();
+  if (e.code === "Space") { e.preventDefault(); $("go").click(); }
+});
+// Test mode: clicking the wall acts as a ball impact.
+wall.addEventListener("click", e => impact(e.clientX / wall.clientWidth, e.clientY / wall.clientHeight));
+
+/* ---------- Game ---------- */
+const bestKey = () => `tw-best-${$("size").value}-${$("len").value}`;
+function startCountdown() {
+  score = 0; hits = 0; shots = 0; reactions = []; effects = []; summary = null; target = null;
+  mode = "countdown"; cdEnd = performance.now() + 3000;
+  $("go").textContent = "Stop";
+  if (!$("card").classList.contains("big")) $("card").hidden = true;
+}
+function newTarget(now) {
+  const m = 0.14 + +$("size").value;
+  let x, y, tries = 0;
+  do { x = m + Math.random() * (1 - 2 * m); y = m + Math.random() * (1 - 2 * m); tries++; }
+  while (target && Math.hypot(x - target.x, y - target.y) < 0.3 && tries < 20);
+  target = { x, y, born: now };
+}
+function endRound(stopped = false) {
+  if (mode === "countdown") { mode = "idle"; $("go").textContent = "Start"; $("card").hidden = false; return; }
+  if (mode !== "play") return;
+  mode = "done"; target = null;
+  const best = store.get(bestKey(), 0), newBest = score > best;
+  if (newBest) store.set(bestKey(), score);
+  const avg = reactions.length ? reactions.reduce((a, b) => a + b, 0) / reactions.length : 0;
+  summary = { score, hits, shots, avg, best: Math.max(best, score), newBest, stopped };
+  $("go").textContent = "Play again"; $("card").hidden = false;
+  beep(660, .15); setTimeout(() => beep(990, .25), 160);
+}
+function impact(nx, ny) {
+  const now = performance.now();
+  if (nx < -0.02 || nx > 1.02 || ny < -0.02 || ny > 1.02) return;
+  if (mode !== "play" || !target) { effects.push({ x: nx, y: ny, t: now, kind: "ping" }); beep(500, .05, .12); return; }
+  shots++;
+  const W = wall.width, Hh = wall.height, s = Math.min(W, Hh);
+  const R = +$("size").value * s;
+  const d = Math.hypot((nx - target.x) * W, (ny - target.y) * Hh);
+  if (d <= R * 1.15) {
+    const rt = (now - target.born) / 1000;
+    const bonus = Math.max(0, Math.round(100 * (1 - rt / 3)));
+    const bull = d < R * 0.35 ? 50 : 0;
+    const pts = 100 + bonus + bull;
+    score += pts; hits++; reactions.push(rt);
+    effects.push({ x: target.x, y: target.y, t: now, kind: "hit", text: `+${pts}${bull ? " BULLSEYE" : ""}` });
+    beep(bull ? 1320 : 990, .12, .3); setTimeout(() => beep(bull ? 1760 : 1320, .1, .25), 90);
+    target = null; setTimeout(() => { if (mode === "play") newTarget(performance.now()); }, 450);
+  } else {
+    effects.push({ x: nx, y: ny, t: now, kind: "miss" });
+    beep(220, .12, .2, "square");
+  }
+}
+
+/* ---------- Camera + detector ---------- */
+async function init() {
+  requestAnimationFrame(loop);
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60 } }, audio: false,
+    });
+    video.srcObject = stream; await video.play();
+    prev.width = video.videoWidth; prev.height = video.videoHeight;
+    pill("pCam", true, "Camera on");
+  } catch (e) {
+    pill("pCam", false, "No camera");
+    msg(`I couldn't open the camera (${e.name}). You can still test the game: press <b>Start</b> and click the targets.`);
+  }
+  try {
+    const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+    const make = delegate => ObjectDetector.createFromOptions(vision, {
+      baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite", delegate },
+      runningMode: "VIDEO", scoreThreshold: 0.2, maxResults: 3, categoryAllowlist: ["sports ball"],
+    });
+    try { detector = await make("GPU"); } catch { detector = await make("CPU"); }
+    pill("pModel", true, "Ball tracker ready");
+  } catch (e) {
+    pill("pModel", false, "Tracker failed");
+  }
+}
+
+let lastTs = -1;
+function track(now) {
+  if (!detector || video.readyState < 2) return;
+  const ts = Math.max(now, lastTs + 1); lastTs = ts;
+  const res = detector.detectForVideo(video, ts);
+  let best = null;
+  for (const d of res.detections || []) if (!best || d.categories[0].score > best.categories[0].score) best = d;
+  if (best) {
+    const b = best.boundingBox;
+    ball = { x: b.originX + b.width / 2, y: b.originY + b.height / 2, r: (b.width + b.height) / 4, t: now };
+    hist.push(ball); if (hist.length > 12) hist.shift();
+    detectImpact(now);
+  } else if (ball && now - ball.t > 250) { ball = null; hist = []; }
+}
+
+/* Impact = the ball was moving fast and then reverses direction or nearly stops,
+   or its size stops shrinking and starts growing (camera behind the kicker). */
+function detectImpact(now) {
+  if (!H || hist.length < 3 || now - lastImpact < 700) return;
+  const [a, b, c] = hist.slice(-3);
+  if (c.t - b.t > 150 || b.t - a.t > 150) return;   // gap in tracking
+  const v1 = [(b.x - a.x) / (b.t - a.t), (b.y - a.y) / (b.t - a.t)];
+  const v2 = [(c.x - b.x) / (c.t - b.t), (c.y - b.y) / (c.t - b.t)];
+  const s1 = Math.hypot(...v1), s2 = Math.hypot(...v2);
+  const minSpeed = prev.width * 0.0004;               // ~0.4 frame-widths per second
+  const reversed = v1[0] * v2[0] + v1[1] * v2[1] < 0;
+  const stopped = s2 < s1 * 0.35;
+  const sizeTurn = b.r <= a.r && c.r > b.r * 1.08;
+  if (s1 > minSpeed && (reversed || stopped || sizeTurn)) {
+    lastImpact = now;
+    const [nx, ny] = mapPt(H, b.x, b.y);
+    impact(nx, ny);
+  }
+}
+
+/* ---------- Drawing ---------- */
+function resize() {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const w = Math.round(innerWidth * dpr), h = Math.round(innerHeight * dpr);
+  if (wall.width !== w || wall.height !== h) { wall.width = w; wall.height = h; }
+}
+function text(t, x, y, size, color, align = "center") {
+  wctx.save(); wctx.font = `${size}px "Lilita One", system-ui`; wctx.textAlign = align; wctx.textBaseline = "middle";
+  wctx.fillStyle = color; wctx.fillText(t, x, y); wctx.restore();
+}
+function drawWall(now) {
+  resize();
+  const W = wall.width, Hh = wall.height, s = Math.min(W, Hh);
+  wctx.fillStyle = "#06140d"; wctx.fillRect(0, 0, W, Hh);
+
+  // Faint pitch lines so the projection edge is visible
+  wctx.strokeStyle = "rgba(233,245,236,.08)"; wctx.lineWidth = s * 0.004;
+  wctx.strokeRect(W * 0.02, Hh * 0.02, W * 0.96, Hh * 0.96);
+  wctx.beginPath(); wctx.arc(W / 2, Hh / 2, s * 0.15, 0, 7); wctx.stroke();
+
+  if (calibrating || (!H && mode === "idle")) {
+    CORNERS.forEach(([cx, cy], i) => {
+      const x = cx * W, y = cy * Hh, r = s * 0.045, done = calibrating && i < calPts.length;
+      wctx.fillStyle = done ? "#7cff6b" : "#ffd23f";
+      wctx.beginPath(); wctx.arc(x, y, r, 0, 7); wctx.fill();
+      wctx.fillStyle = "#06140d"; wctx.beginPath(); wctx.arc(x, y, r * 0.18, 0, 7); wctx.fill();
+      text(String(i + 1), x + r * 1.8 * (cx < .5 ? 1 : -1), y, s * 0.05, "#ffd23f");
+    });
+  }
+
+  // Target
+  if (target && mode === "play") {
+    const R = +$("size").value * s, x = target.x * W, y = target.y * Hh;
+    const age = (now - target.born) / 1000, pulse = 1 + 0.04 * Math.sin(now / 110);
+    const rings = ["#ffd23f", "#ff7a59", "#ffd23f", "#ffffff"];
+    rings.forEach((c, i) => { wctx.fillStyle = c; wctx.beginPath(); wctx.arc(x, y, R * pulse * (1 - i * 0.25), 0, 7); wctx.fill(); });
+    // countdown ring: target moves after 5s
+    wctx.strokeStyle = "#6ee7ff"; wctx.lineWidth = s * 0.008;
+    wctx.beginPath(); wctx.arc(x, y, R * 1.25, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.max(0, 1 - age / 5)); wctx.stroke();
+    if (age > 5) newTarget(now);
+  }
+
+  // Effects
+  effects = effects.filter(e => now - e.t < 900);
+  for (const e of effects) {
+    const k = (now - e.t) / 900, x = e.x * W, y = e.y * Hh;
+    wctx.save(); wctx.globalAlpha = 1 - k;
+    if (e.kind === "hit") {
+      wctx.strokeStyle = "#7cff6b"; wctx.lineWidth = s * 0.012;
+      wctx.beginPath(); wctx.arc(x, y, s * (0.08 + 0.25 * k), 0, 7); wctx.stroke();
+      text(e.text, x, y - s * (0.12 + 0.1 * k), s * 0.06, "#7cff6b");
+    } else if (e.kind === "miss") {
+      const r = s * 0.035; wctx.strokeStyle = "#ff7a59"; wctx.lineWidth = s * 0.01;
+      wctx.beginPath(); wctx.moveTo(x - r, y - r); wctx.lineTo(x + r, y + r); wctx.moveTo(x + r, y - r); wctx.lineTo(x - r, y + r); wctx.stroke();
+    } else {
+      wctx.strokeStyle = "#6ee7ff"; wctx.lineWidth = s * 0.006;
+      wctx.beginPath(); wctx.arc(x, y, s * (0.03 + 0.08 * k), 0, 7); wctx.stroke();
+    }
+    wctx.restore();
+  }
+
+  // Live ball dot (mapped through calibration)
+  if ($("dot").checked && H && ball && now - ball.t < 200) {
+    const [nx, ny] = mapPt(H, ball.x, ball.y);
+    wctx.fillStyle = "#6ee7ff"; wctx.beginPath(); wctx.arc(nx * W, ny * Hh, s * 0.012, 0, 7); wctx.fill();
+  }
+
+  // HUD
+  if (mode === "play" || mode === "countdown") {
+    const left = mode === "play" ? Math.max(0, Math.ceil((endsAt - now) / 1000)) : +$("len").value;
+    text(String(score), W * 0.04, Hh * 0.07, s * 0.08, "#ffd23f", "left");
+    text(`${left}s`, W * 0.96, Hh * 0.07, s * 0.07, "#e9f5ec", "right");
+  }
+  if (mode === "countdown") {
+    const n = Math.ceil((cdEnd - now) / 1000);
+    if (n <= 0) { mode = "play"; endsAt = now + +$("len").value * 1000; newTarget(now); beep(1040, .25, .3); }
+    else { if (drawWall.lastN !== n) { drawWall.lastN = n; beep(520, .1); } text(String(n), W / 2, Hh / 2, s * 0.35, "#ffd23f"); }
+  }
+  if (mode === "play" && now >= endsAt) endRound();
+  if (mode === "done" && summary) {
+    const acc = summary.shots ? Math.round(100 * summary.hits / summary.shots) : 0;
+    text(summary.newBest ? "New best!" : "Time!", W / 2, Hh * 0.3, s * 0.1, "#ffd23f");
+    text(String(summary.score), W / 2, Hh * 0.48, s * 0.2, "#e9f5ec");
+    text(`${summary.hits} hits  ·  ${acc}% accuracy  ·  ${summary.avg ? summary.avg.toFixed(1) + "s" : "–"} avg reaction`, W / 2, Hh * 0.64, s * 0.045, "#9fc1ad");
+    text(`Best: ${summary.best}`, W / 2, Hh * 0.73, s * 0.045, "#9fc1ad");
+  }
+  if (mode === "idle" && H && !calibrating) text("Press Start", W / 2, Hh / 2, s * 0.08, "rgba(233,245,236,.35)");
+}
+
+function drawPreview(now) {
+  if (video.readyState < 2) {
+    pctx.fillStyle = "#000"; pctx.fillRect(0, 0, prev.width, prev.height);
+    pctx.fillStyle = "#9fc1ad"; pctx.font = "20px Nunito, sans-serif"; pctx.textAlign = "center";
+    pctx.fillText("Camera off", prev.width / 2, prev.height / 2); return;
+  }
+  pctx.drawImage(video, 0, 0, prev.width, prev.height);
+  const u = prev.width / 640;
+  // calibration quad
+  const pts = calibrating ? calPts : null;
+  if (pts) pts.forEach(([x, y], i) => {
+    pctx.fillStyle = "#7cff6b"; pctx.beginPath(); pctx.arc(x, y, 8 * u, 0, 7); pctx.fill();
+    pctx.fillStyle = "#000"; pctx.font = `${16 * u}px Nunito`; pctx.fillText(String(i + 1), x + 10 * u, y - 10 * u);
+  });
+  if (H && !calibrating) {
+    // outline of the calibrated wall area, from the saved corner clicks
+    const saved = store.get("tw-calpts", null);
+    if (saved) {
+      pctx.strokeStyle = "#ffd23f"; pctx.lineWidth = 2 * u; pctx.beginPath();
+      saved.forEach(([x, y], i) => i ? pctx.lineTo(x, y) : pctx.moveTo(x, y)); pctx.closePath(); pctx.stroke();
+    }
+  }
+  if (ball && now - ball.t < 200) {
+    pctx.strokeStyle = "#6ee7ff"; pctx.lineWidth = 3 * u;
+    pctx.beginPath(); pctx.arc(ball.x, ball.y, ball.r * 1.2, 0, 7); pctx.stroke();
+  }
+  pill("pBall", !!(ball && now - ball.t < 300), ball && now - ball.t < 300 ? "Ball seen" : "No ball");
+}
+
+function loop(now) {
+  track(now);
+  drawWall(now);
+  if (!$("card").hidden) drawPreview(now);
+  requestAnimationFrame(loop);
+}
+
+init();
+</script>
+</body>
+</html>
