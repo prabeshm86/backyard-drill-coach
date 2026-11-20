@@ -1,1 +1,6 @@
 .DS_Store
+
+# test clips stay on this computer
+clips/
+*.webm
+*.mp4

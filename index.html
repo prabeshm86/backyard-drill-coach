@@ -329,10 +329,18 @@ $("recBtn").addEventListener("click", () => {
     $("recBtn").textContent = "Record test clip"; $("recBtn").disabled = false;
     say("Clip saved to your Downloads folder", 2500);
   };
-  let left = 15;
-  $("recBtn").disabled = true; $("recBtn").textContent = `Recording ${left}s`;
-  rec.start(); beep(660, .1);
-  const iv = setInterval(() => { left--; $("recBtn").textContent = `Recording ${left}s`; if (left <= 0) { clearInterval(iv); rec.stop(); beep(990, .15); } }, 1000);
+  // 5-second countdown first, so there's time to step back into position.
+  let wait = 5, left = 15;
+  $("recBtn").disabled = true;
+  const tick = () => { $("recBtn").textContent = `Starts in ${wait}…`; say(`Get in position: ${wait}`, 900); speak(String(wait)); beep(520, .08); };
+  tick();
+  const cd = setInterval(() => {
+    if (--wait > 0) return tick();
+    clearInterval(cd);
+    rec.start(); beep(990, .2); speak("Go!"); say("Recording: do the drill!", 1500);
+    $("recBtn").textContent = `Recording ${left}s`;
+    const iv = setInterval(() => { left--; $("recBtn").textContent = `Recording ${left}s`; if (left <= 0) { clearInterval(iv); rec.stop(); beep(990, .15); speak("Done"); } }, 1000);
+  }, 1000);
 });
 $("clipFile").addEventListener("change", e => { const f = e.target.files[0]; if (f) playClip(URL.createObjectURL(f)); });
 let noCam = false;
